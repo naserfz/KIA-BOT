@@ -1,11 +1,17 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import asyncio
+import json
 import threading
 import tkinter as tk
+from pathlib import Path
 from tkinter import ttk, messagebox
 
 from core import KIACore
+
+
+ROOT = Path(__file__).resolve().parent.parent
+SELECTION_FILE = ROOT / "market_selection.json"
 
 
 class KIAControlWindow:
@@ -15,8 +21,8 @@ class KIAControlWindow:
         self.root = tk.Tk()
 
         self.root.title("KIA BOT")
-        self.root.geometry("470x380")
-        self.root.resizable(False, False)
+        self.root.geometry("900x620")
+        self.root.minsize(820, 560)
 
         self.core: KIACore | None = None
 
@@ -27,43 +33,36 @@ class KIAControlWindow:
         self.running = False
         self.stopping = False
 
+        self.selection_data = []
+
         self.exchange_var = tk.StringVar(
             value="NOBITEX"
         )
 
-        self.market_var = tk.StringVar(
-            value="MARKET: ---"
-        )
-
         self.status_var = tk.StringVar(
-            value="STATUS: STOPPED"
+            value="STOPPED"
         )
 
+        self.mode_var = tk.StringVar(
+            value="PAPER"
+        )
+
+        self.database_var = tk.StringVar(
+            value="0"
+        )
+
+        self.analysis_var = tk.StringVar(
+            value="0"
+        )
+
+        self._load_selection()
         self._build_ui()
+        self._start_event_loop()
 
         try:
-
             self.core = KIACore()
-
-            self.exchange_var.set(
-                self.core.exchange_name
-            )
-
-            self.market_var.set(
-                f"MARKET: {self.core.symbol}"
-            )
-
         except Exception as exc:
-
-            self.status_var.set(
-                "STATUS: ERROR"
-            )
-
-            print(
-                f"[GUI ERROR] {exc}"
-            )
-
-        self._start_event_loop()
+            print(f"[GUI CORE ERROR] {exc}")
 
         self.root.protocol(
             "WM_DELETE_WINDOW",
@@ -71,154 +70,563 @@ class KIAControlWindow:
         )
 
     # ========================================================
+    # SELECTION
+    # ========================================================
+
+    def _load_selection(self) -> None:
+
+        self.selection_data = []
+
+        if not SELECTION_FILE.exists():
+            return
+
+        try:
+            data = json.loads(
+                SELECTION_FILE.read_text(
+                    encoding="utf-8-sig"
+                )
+            )
+
+            selections = data.get(
+                "selections",
+                [],
+            )
+
+            if isinstance(selections, list):
+                for item in selections:
+
+                    if not isinstance(item, dict):
+                        continue
+
+                    exchange = str(
+                        item.get(
+                            "exchange",
+                            "",
+                        )
+                    ).strip().upper()
+
+                    symbols = sorted(
+                        {
+                            str(x).strip().upper()
+                            for x in item.get(
+                                "symbols",
+                                [],
+                            )
+                            if str(x).strip()
+                        }
+                    )
+
+                    analysis = sorted(
+                        {
+                            str(x).strip().upper()
+                            for x in item.get(
+                                "analysis",
+                                [],
+                            )
+                            if str(x).strip()
+                        }
+                        & set(symbols)
+                    )
+
+                    if exchange and symbols:
+                        self.selection_data.append(
+                            {
+                                "exchange": exchange,
+                                "symbols": symbols,
+                                "analysis": analysis,
+                            }
+                        )
+
+        except Exception as exc:
+            print(
+                f"[SELECTION ERROR] {exc}"
+            )
+
+    def _selection_summary(self):
+
+        database_total = 0
+        analysis_total = 0
+
+        for item in self.selection_data:
+            database_total += len(
+                item["symbols"]
+            )
+            analysis_total += len(
+                item["analysis"]
+            )
+
+        return database_total, analysis_total
+
+    # ========================================================
     # UI
     # ========================================================
 
     def _build_ui(self) -> None:
 
-        frame = ttk.Frame(
-            self.root,
-            padding=25,
+        style = ttk.Style(self.root)
+
+        try:
+            style.theme_use("clam")
+        except tk.TclError:
+            pass
+
+        style.configure(
+            "Title.TLabel",
+            font=("Segoe UI", 25, "bold"),
         )
 
-        frame.pack(
+        style.configure(
+            "Subtitle.TLabel",
+            font=("Segoe UI", 10),
+        )
+
+        style.configure(
+            "CardTitle.TLabel",
+            font=("Segoe UI", 10, "bold"),
+        )
+
+        style.configure(
+            "Value.TLabel",
+            font=("Segoe UI", 17, "bold"),
+        )
+
+        style.configure(
+            "Action.TButton",
+            font=("Segoe UI", 10, "bold"),
+            padding=9,
+        )
+
+        # ----------------------------------------------------
+        # HEADER
+        # ----------------------------------------------------
+
+        header = ttk.Frame(
+            self.root,
+            padding=(25, 20, 25, 12),
+        )
+
+        header.pack(
+            fill="x"
+        )
+
+        ttk.Label(
+            header,
+            text="KIA BOT",
+            style="Title.TLabel",
+        ).pack(
+            side="left"
+        )
+
+        ttk.Label(
+            header,
+            text="  CONTROL CENTER",
+            style="Subtitle.TLabel",
+        ).pack(
+            side="left",
+            pady=(11, 0),
+        )
+
+        # ----------------------------------------------------
+        # STATUS BAR
+        # ----------------------------------------------------
+
+        status_frame = ttk.LabelFrame(
+            self.root,
+            text=" SYSTEM STATUS ",
+            padding=12,
+        )
+
+        status_frame.pack(
+            fill="x",
+            padx=25,
+            pady=8,
+        )
+
+        status_grid = ttk.Frame(
+            status_frame
+        )
+
+        status_grid.pack(
+            fill="x"
+        )
+
+        self._status_card(
+            status_grid,
+            "BOT STATUS",
+            self.status_var,
+            0,
+        )
+
+        self._status_card(
+            status_grid,
+            "MODE",
+            self.mode_var,
+            1,
+        )
+
+        exchange_value = (
+            self.selection_data[0]["exchange"]
+            if self.selection_data
+            else "---"
+        )
+
+        self.exchange_display = tk.StringVar(
+            value=exchange_value
+        )
+
+        self._status_card(
+            status_grid,
+            "EXCHANGE",
+            self.exchange_display,
+            2,
+        )
+
+        self._status_card(
+            status_grid,
+            "DATABASE",
+            self.database_var,
+            3,
+        )
+
+        self._status_card(
+            status_grid,
+            "ANALYSIS",
+            self.analysis_var,
+            4,
+        )
+
+        # ----------------------------------------------------
+        # SELECTION
+        # ----------------------------------------------------
+
+        selection_frame = ttk.LabelFrame(
+            self.root,
+            text=" MARKET SELECTION ",
+            padding=12,
+        )
+
+        selection_frame.pack(
+            fill="both",
+            expand=True,
+            padx=25,
+            pady=8,
+        )
+
+        body = ttk.Frame(
+            selection_frame
+        )
+
+        body.pack(
             fill="both",
             expand=True,
         )
 
-        ttk.Label(
-            frame,
-            text="KIA BOT",
-            font=("Segoe UI", 20, "bold"),
-        ).pack(
-            pady=(0, 18)
+        # DATABASE
+
+        db_frame = ttk.LabelFrame(
+            body,
+            text=" DATABASE MARKETS ",
+            padding=8,
         )
 
-        ttk.Label(
-            frame,
-            text="EXCHANGE",
-            font=("Segoe UI", 10, "bold"),
-        ).pack(
-            pady=(0, 4)
-        )
-
-        exchange_frame = ttk.Frame(frame)
-
-        exchange_frame.pack(
-            fill="x",
-            pady=(0, 12),
-        )
-
-        self.exchange_combo = ttk.Combobox(
-            exchange_frame,
-            textvariable=self.exchange_var,
-            values=(
-                "NOBITEX",
-            ),
-            state="readonly",
-            width=20,
-        )
-
-        self.exchange_combo.pack(
+        db_frame.pack(
             side="left",
+            fill="both",
             expand=True,
-            fill="x",
+            padx=(0, 6),
         )
 
-        self.exchange_button = ttk.Button(
-            exchange_frame,
-            text="SELECT",
-            command=self.select_exchange,
-            width=12,
+        self.database_list = tk.Listbox(
+            db_frame,
+            font=("Consolas", 11),
+            activestyle="none",
         )
 
-        self.exchange_button.pack(
+        self.database_list.pack(
+            fill="both",
+            expand=True,
+        )
+
+        # ANALYSIS
+
+        analysis_frame = ttk.LabelFrame(
+            body,
+            text=" ANALYSIS MARKETS ",
+            padding=8,
+        )
+
+        analysis_frame.pack(
             side="left",
-            padx=(8, 0),
+            fill="both",
+            expand=True,
+            padx=6,
         )
 
-        ttk.Label(
-            frame,
-            textvariable=self.market_var,
-            font=("Segoe UI", 11),
-        ).pack(
-            pady=5
+        self.analysis_list = tk.Listbox(
+            analysis_frame,
+            font=("Consolas", 11),
+            activestyle="none",
         )
 
-        ttk.Label(
-            frame,
-            textvariable=self.status_var,
-            font=("Segoe UI", 11),
-        ).pack(
-            pady=5
+        self.analysis_list.pack(
+            fill="both",
+            expand=True,
         )
 
-        buttons = ttk.Frame(frame)
+        # INFO
+
+        info_frame = ttk.LabelFrame(
+            body,
+            text=" ACTIVE SELECTION ",
+            padding=8,
+        )
+
+        info_frame.pack(
+            side="left",
+            fill="both",
+            expand=True,
+            padx=(6, 0),
+        )
+
+        self.info_text = tk.Text(
+            info_frame,
+            font=("Consolas", 10),
+            height=10,
+            width=28,
+            state="disabled",
+            wrap="none",
+        )
+
+        self.info_text.pack(
+            fill="both",
+            expand=True,
+        )
+
+        # ----------------------------------------------------
+        # BUTTONS
+        # ----------------------------------------------------
+
+        buttons = ttk.Frame(
+            self.root,
+            padding=(25, 10, 25, 15),
+        )
 
         buttons.pack(
-            pady=25
+            fill="x"
         )
 
-        self.start_button = ttk.Button(
+        ttk.Button(
+            buttons,
+            text="REFRESH SELECTION",
+            style="Action.TButton",
+            command=self.refresh_selection,
+        ).pack(
+            side="left",
+            padx=4,
+        )
+
+        ttk.Button(
             buttons,
             text="START",
+            style="Action.TButton",
             command=self.start,
-            width=12,
+        ).pack(
+            side="left",
+            padx=4,
         )
 
-        self.start_button.grid(
-            row=0,
-            column=0,
-            padx=5,
-        )
-
-        self.stop_button = ttk.Button(
+        ttk.Button(
             buttons,
             text="STOP",
+            style="Action.TButton",
             command=self.stop,
-            width=12,
+        ).pack(
+            side="left",
+            padx=4,
         )
 
-        self.stop_button.grid(
-            row=0,
-            column=1,
-            padx=5,
-        )
-
-        self.restart_button = ttk.Button(
+        ttk.Button(
             buttons,
             text="RESTART",
+            style="Action.TButton",
             command=self.restart,
-            width=12,
+        ).pack(
+            side="left",
+            padx=4,
         )
 
-        self.restart_button.grid(
-            row=0,
-            column=2,
-            padx=5,
-        )
-
-        self.exit_button = ttk.Button(
+        ttk.Button(
             buttons,
             text="EXIT",
             command=self.close,
-            width=12,
+        ).pack(
+            side="right",
+            padx=4,
         )
 
-        self.exit_button.grid(
-            row=1,
-            column=0,
-            columnspan=3,
-            pady=(15, 0),
+        self._refresh_selection_view()
+
+    def _status_card(
+        self,
+        parent,
+        title,
+        variable,
+        column,
+    ):
+
+        card = ttk.Frame(
+            parent,
+            padding=(10, 3),
+        )
+
+        card.grid(
+            row=0,
+            column=column,
+            sticky="ew",
+        )
+
+        parent.columnconfigure(
+            column,
+            weight=1,
+        )
+
+        ttk.Label(
+            card,
+            text=title,
+            style="CardTitle.TLabel",
+        ).pack()
+
+        ttk.Label(
+            card,
+            textvariable=variable,
+            style="Value.TLabel",
+        ).pack(
+            pady=(2, 0)
+        )
+
+    # ========================================================
+    # SELECTION VIEW
+    # ========================================================
+
+    def _refresh_selection_view(self):
+
+        self.database_list.delete(
+            0,
+            tk.END,
+        )
+
+        self.analysis_list.delete(
+            0,
+            tk.END,
+        )
+
+        self.info_text.config(
+            state="normal"
+        )
+
+        self.info_text.delete(
+            "1.0",
+            tk.END,
+        )
+
+        database_total, analysis_total = (
+            self._selection_summary()
+        )
+
+        self.database_var.set(
+            str(database_total)
+        )
+
+        self.analysis_var.set(
+            str(analysis_total)
+        )
+
+        for item in self.selection_data:
+
+            exchange = item["exchange"]
+
+            for symbol in item["symbols"]:
+                self.database_list.insert(
+                    tk.END,
+                    f"{exchange:<10} | {symbol}",
+                )
+
+            for symbol in item["analysis"]:
+                self.analysis_list.insert(
+                    tk.END,
+                    f"{exchange:<10} | {symbol}",
+                )
+
+            self.info_text.insert(
+                tk.END,
+                f"[{exchange}]\n"
+            )
+
+            self.info_text.insert(
+                tk.END,
+                f"Database : "
+                f"{len(item['symbols'])}\n"
+            )
+
+            self.info_text.insert(
+                tk.END,
+                f"Analysis : "
+                f"{len(item['analysis'])}\n\n"
+            )
+
+        if not self.selection_data:
+
+            self.database_list.insert(
+                tk.END,
+                "(NO DATABASE MARKETS)",
+            )
+
+            self.analysis_list.insert(
+                tk.END,
+                "(NO ANALYSIS MARKETS)",
+            )
+
+            self.info_text.insert(
+                tk.END,
+                "No market selection found.\n\n"
+                "Open Market Selector and\n"
+                "configure the selection."
+            )
+
+        self.info_text.config(
+            state="disabled"
+        )
+
+    def refresh_selection(self):
+
+        self._load_selection()
+
+        if self.selection_data:
+            self.exchange_display.set(
+                self.selection_data[0]["exchange"]
+            )
+        else:
+            self.exchange_display.set(
+                "---"
+            )
+
+        self._refresh_selection_view()
+
+        self.status_var.set(
+            "STOPPED"
+            if not self.running
+            else "RUNNING"
         )
 
     # ========================================================
     # EVENT LOOP
     # ========================================================
 
-    def _start_event_loop(self) -> None:
+    def _start_event_loop(self):
 
-        self.loop = asyncio.new_event_loop()
+        self.loop = (
+            asyncio.new_event_loop()
+        )
 
         self.loop_thread = threading.Thread(
             target=self._event_loop_worker,
@@ -227,7 +635,7 @@ class KIAControlWindow:
 
         self.loop_thread.start()
 
-    def _event_loop_worker(self) -> None:
+    def _event_loop_worker(self):
 
         if self.loop is None:
             return
@@ -246,7 +654,6 @@ class KIAControlWindow:
             task.cancel()
 
         if pending:
-
             self.loop.run_until_complete(
                 asyncio.gather(
                     *pending,
@@ -257,10 +664,10 @@ class KIAControlWindow:
         self.loop.close()
 
     # ========================================================
-    # CORE START
+    # START
     # ========================================================
 
-    async def _start_core(self) -> None:
+    async def _start_core(self):
 
         if self.core is None:
             return
@@ -280,8 +687,8 @@ class KIAControlWindow:
 
             self.root.after(
                 0,
-                lambda: self._set_stopped(
-                    "STATUS: ERROR"
+                lambda: self._set_status(
+                    "ERROR"
                 ),
             )
 
@@ -289,7 +696,14 @@ class KIAControlWindow:
 
             self.running = False
 
-    def start(self) -> None:
+            self.root.after(
+                0,
+                lambda: self.status_var.set(
+                    "STOPPED"
+                ),
+            )
+
+    def start(self):
 
         if self.running or self.stopping:
             return
@@ -298,12 +712,23 @@ class KIAControlWindow:
             return
 
         if self.core is None:
+            messagebox.showerror(
+                "KIA BOT",
+                "Core is not available.",
+            )
+            return
+
+        if not self.selection_data:
+            messagebox.showwarning(
+                "KIA BOT",
+                "No market selection found.",
+            )
             return
 
         self.running = True
 
         self.status_var.set(
-            "STATUS: RUNNING"
+            "RUNNING"
         )
 
         self.core_task = (
@@ -317,7 +742,7 @@ class KIAControlWindow:
     # STOP
     # ========================================================
 
-    async def _stop_core(self) -> None:
+    async def _stop_core(self):
 
         try:
 
@@ -334,21 +759,20 @@ class KIAControlWindow:
 
             self.running = False
             self.stopping = False
-
             self.core_task = None
 
             self.root.after(
                 0,
                 lambda: self.status_var.set(
-                    "STATUS: STOPPED"
+                    "STOPPED"
                 ),
             )
 
-    def stop(self) -> None:
+    def stop(self):
 
         if not self.running:
             self.status_var.set(
-                "STATUS: STOPPED"
+                "STOPPED"
             )
             return
 
@@ -361,7 +785,7 @@ class KIAControlWindow:
         self.stopping = True
 
         self.status_var.set(
-            "STATUS: STOPPING"
+            "STOPPING"
         )
 
         asyncio.run_coroutine_threadsafe(
@@ -373,7 +797,7 @@ class KIAControlWindow:
     # RESTART
     # ========================================================
 
-    async def _restart_core(self) -> None:
+    async def _restart_core(self):
 
         try:
 
@@ -394,13 +818,6 @@ class KIAControlWindow:
                 f"[RESTART ERROR] {exc}"
             )
 
-            self.root.after(
-                0,
-                lambda: self._set_stopped(
-                    "STATUS: ERROR"
-                ),
-            )
-
         finally:
 
             self.running = False
@@ -409,19 +826,19 @@ class KIAControlWindow:
             self.root.after(
                 0,
                 lambda: self.status_var.set(
-                    "STATUS: STOPPED"
+                    "STOPPED"
                 ),
             )
 
-    def restart(self) -> None:
-
-        if self.stopping:
-            return
+    def restart(self):
 
         if self.core is None:
             return
 
         if self.loop is None:
+            return
+
+        if self.stopping:
             return
 
         if not self.running:
@@ -431,7 +848,7 @@ class KIAControlWindow:
         self.stopping = True
 
         self.status_var.set(
-            "STATUS: RESTARTING"
+            "RESTARTING"
         )
 
         asyncio.run_coroutine_threadsafe(
@@ -440,216 +857,17 @@ class KIAControlWindow:
         )
 
     # ========================================================
-    # EXCHANGE SELECT
-    # ========================================================
-
-    def select_exchange(self) -> None:
-
-        selected = (
-            self.exchange_var.get()
-            .strip()
-            .upper()
-        )
-
-        if not selected:
-            return
-
-        if self.core is None:
-            return
-
-        if selected == self.core.exchange_name:
-
-            self.status_var.set(
-                f"STATUS: "
-                f"{selected} ACTIVE"
-            )
-
-            return
-
-        if self.stopping:
-            return
-
-        if self.running:
-
-            self.stopping = True
-
-            self.status_var.set(
-                "STATUS: SWITCHING EXCHANGE"
-            )
-
-            asyncio.run_coroutine_threadsafe(
-                self._switch_exchange(
-                    selected
-                ),
-                self.loop,
-            )
-
-        else:
-
-            self._apply_exchange(
-                selected
-            )
-
-    async def _switch_exchange(
-        self,
-        exchange: str,
-    ) -> None:
-
-        try:
-
-            if self.core is not None:
-
-                await self.core.switch_exchange(
-                    exchange
-                )
-
-            self.root.after(
-                0,
-                lambda: self._exchange_changed(
-                    exchange
-                ),
-            )
-
-        except asyncio.CancelledError:
-            raise
-
-        except Exception as exc:
-
-            print(
-                f"[EXCHANGE SWITCH ERROR] "
-                f"{exc}"
-            )
-
-            self.root.after(
-                0,
-                lambda: messagebox.showerror(
-                    "KIA BOT",
-                    str(exc),
-                ),
-            )
-
-            self.root.after(
-                0,
-                lambda: self._exchange_changed(
-                    self.core.exchange_name
-                    if self.core
-                    else "NOBITEX"
-                ),
-            )
-
-    def _exchange_changed(
-        self,
-        exchange: str,
-    ) -> None:
-
-        self.exchange_var.set(
-            exchange
-        )
-
-        if self.core is not None:
-
-            self.market_var.set(
-                f"MARKET: "
-                f"{self.core.symbol}"
-            )
-
-        self.stopping = False
-        self.running = True
-
-        self.status_var.set(
-            f"STATUS: "
-            f"RUNNING - {exchange}"
-        )
-
-    def _apply_exchange(
-        self,
-        exchange: str,
-    ) -> None:
-
-        try:
-
-            if self.core is not None:
-
-                self.core.exchange_name = (
-                    exchange
-                )
-
-                self.core.bot = (
-                    self.core._create_exchange(
-                        exchange
-                    )
-                )
-
-                self.core.database = (
-                    self.core._create_database()
-                )
-
-                self.core.exchange_service.bot = (
-                    self.core.bot
-                )
-
-                self.core.database_service.database = (
-                    self.core.database
-                )
-
-            self.exchange_var.set(
-                exchange
-            )
-
-            self.status_var.set(
-                f"STATUS: "
-                f"{exchange} SELECTED"
-            )
-
-        except Exception as exc:
-
-            print(
-                f"[EXCHANGE ERROR] {exc}"
-            )
-
-            messagebox.showerror(
-                "KIA BOT",
-                str(exc),
-            )
-
-
-    # ========================================================
-    # DATABASE MANAGER
-    # ========================================================
-
-    def open_database(self) -> None:
-
-        try:
-            from database.manager import (
-                open_database_manager
-            )
-
-            open_database_manager(
-                self.root
-            )
-
-        except Exception as exc:
-
-            print(
-                f"[DATABASE GUI ERROR] {exc}"
-            )
-
-            messagebox.showerror(
-                "KIA BOT",
-                str(exc),
-            )
-
-    # ========================================================
     # STATUS
     # ========================================================
 
-    def _set_stopped(
+    def _set_status(
         self,
         status: str,
-    ) -> None:
+    ):
 
-        self.running = False
-        self.stopping = False
+        self.running = (
+            status == "RUNNING"
+        )
 
         self.status_var.set(
             status
@@ -659,7 +877,7 @@ class KIAControlWindow:
     # CLOSE
     # ========================================================
 
-    def close(self) -> None:
+    def close(self):
 
         if self.loop is not None:
 
@@ -679,8 +897,7 @@ class KIAControlWindow:
             except Exception as exc:
 
                 print(
-                    f"[CLOSE ERROR] "
-                    f"{exc}"
+                    f"[CLOSE ERROR] {exc}"
                 )
 
             try:
@@ -694,7 +911,8 @@ class KIAControlWindow:
 
         self.root.destroy()
 
-    def run(self) -> None:
+    def run(self):
+
         self.root.mainloop()
 
 
