@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-
 import json
 from pathlib import Path
 
@@ -16,12 +15,7 @@ from exchange.normalizer import ExchangeNormalizer
 
 
 ROOT = Path(__file__).parent.parent
-
-MARKET_STATE_FILE = (
-    ROOT
-    / "exchange"
-    / "market_state.json"
-)
+SELECTION_FILE = ROOT / "market_selection.json"
 
 
 class KIACore:
@@ -30,242 +24,255 @@ class KIACore:
         "NOBITEX",
     )
 
-    def __init__(
-        self,
-        exchange: str = "NOBITEX",
-    ) -> None:
+    def __init__(self) -> None:
 
-        self.symbol = self._get_active_market()
+        self.selections = self._load_selection()
 
-        self.exchange_name = (
-            str(exchange)
-            .strip()
-            .upper()
-        )
-
-        if (
-            self.exchange_name
-            not in self.SUPPORTED_EXCHANGES
-        ):
-            raise RuntimeError(
-                f"Unsupported exchange: "
-                f"{self.exchange_name}"
-            )
-
-        self.bot = self._create_exchange(
-            self.exchange_name
-        )
+        self.bots: dict[str, Nobitex] = {}
+        self.databases: dict[tuple[str, str], MarketDatabase] = {}
+        self.database_services: dict[tuple[str, str], DatabaseService] = {}
+        self.exchange_services: dict[str, ExchangeService] = {}
 
         self.normalizer = ExchangeNormalizer()
-
-        self.database = self._create_database()
-
-        self.exchange_service = ExchangeService(
-            self.bot
-        )
-
-        self.database_service = DatabaseService(
-            self.database
-        )
-
         self.service_manager = ServiceManager()
-
-        self.service_manager.register(
-            "database",
-            self.database_service,
-        )
-
-        self.service_manager.register(
-            "exchange",
-            self.exchange_service,
-        )
 
         self.running = False
 
-    # ========================================================
-    # MARKET
-    # ========================================================
+        self._build_runtime()
 
     @staticmethod
-    def _get_active_market() -> str:
+    def _load_selection() -> dict[str, set[str]]:
 
-        if not MARKET_STATE_FILE.exists():
+        if not SELECTION_FILE.exists():
             raise RuntimeError(
-                "No market_state.json found."
+                "market_selection.json not found."
             )
 
-        state = json.loads(
-            MARKET_STATE_FILE.read_text(
+        payload = json.loads(
+            SELECTION_FILE.read_text(
                 encoding="utf-8"
             )
         )
 
-        symbol = state.get(
-            "active_market"
-        )
+        result: dict[str, set[str]] = {}
 
-        if not symbol:
+        for item in payload.get("selections", []):
+
+            exchange = str(
+                item.get("exchange", "")
+            ).strip().upper()
+
+            if not exchange:
+                continue
+
+            symbols = {
+                str(symbol).strip().upper()
+                for symbol in item.get("symbols", [])
+                if str(symbol).strip()
+            }
+
+            if symbols:
+                result[exchange] = symbols
+
+        if not result:
             raise RuntimeError(
-                "No active market selected."
+                "No markets selected in market_selection.json."
             )
 
-        return str(symbol).strip().upper()
+        return result
 
-    # ========================================================
-    # EXCHANGE
-    # ========================================================
+    def _build_runtime(self) -> None:
 
-    @staticmethod
-    def _create_exchange(
-        exchange: str,
-    ):
+        for exchange, symbols in self.selections.items():
 
-        if exchange == "NOBITEX":
-            return Nobitex()
+            if exchange not in self.SUPPORTED_EXCHANGES:
+                raise RuntimeError(
+                    f"Unsupported exchange: {exchange}"
+                )
 
-        raise RuntimeError(
-            f"Unsupported exchange: {exchange}"
-        )
+            bot = Nobitex()
 
-    def _create_database(
-        self,
-    ) -> MarketDatabase:
+            self.bots[exchange] = bot
 
-        return MarketDatabase(
-            exchange=self.exchange_name.lower(),
-            symbol=self.symbol,
-            root=ROOT / "database",
-        )
+            exchange_service = ExchangeService(bot)
 
-    # ========================================================
-    # START
-    # ========================================================
+            self.exchange_services[exchange] = (
+                exchange_service
+            )
+
+            self.service_manager.register(
+                f"exchange_{exchange.lower()}",
+                exchange_service,
+            )
+
+            for symbol in sorted(symbols):
+
+                database = MarketDatabase(
+                    exchange=exchange.lower(),
+                    symbol=symbol,
+                    root=ROOT / "database",
+                )
+
+                database_service = DatabaseService(
+                    database
+                )
+
+                key = (
+                    exchange,
+                    symbol,
+                )
+
+                self.databases[key] = database
+                self.database_services[key] = (
+                    database_service
+                )
+
+                self.service_manager.register(
+                    f"database_{exchange.lower()}_{symbol.lower()}",
+                    database_service,
+                )
 
     async def start(self) -> None:
 
         if self.running:
             return
 
-        print("KIA BOT")
-        print(
-            f"ACTIVE EXCHANGE: "
-            f"{self.exchange_name}"
-        )
-        print(
-            f"ACTIVE MARKET: "
-            f"{self.symbol}"
-        )
         print("")
+        print("=" * 70)
+        print("KIA BOT")
+        print("=" * 70)
+
+        for exchange, symbols in self.selections.items():
+
+            print(
+                f"EXCHANGE: {exchange}"
+            )
+
+            print(
+                f"MARKETS: {', '.join(sorted(symbols))}"
+            )
+
+        print("=" * 70)
 
         await self.service_manager.start_all()
 
-        await self.bot.select_market(
-            self.symbol,
-            "5",
-        )
+        for exchange, symbols in self.selections.items():
+
+            bot = self.bots[exchange]
+
+            await bot.connect()
+
+            await bot.select_markets(
+                sorted(symbols),
+                "5",
+            )
 
         self.running = True
 
         print("")
-        print("DATABASE READY")
-        print(
-            f"DATABASE PATH: "
-            f"{self.database.market_dir}"
-        )
-        print("")
+        print("DATABASES READY")
         print("WAITING FOR RAW DATA...")
+        print("")
 
         try:
 
-            async for message in self.bot.messages():
-
-                normalized = (
-                    self.normalizer.normalize(
-                        message
+            tasks = [
+                asyncio.create_task(
+                    self._consume_exchange(
+                        exchange,
+                        bot,
                     )
                 )
+                for exchange, bot
+                in self.bots.items()
+            ]
 
-                self.database_service.save(
-                    normalized
-                )
-
-                print(
-                    f"[SAVED] "
-                    f"{normalized['type']} "
-                    f"{normalized['symbol']}"
-                )
+            await asyncio.gather(*tasks)
 
         except asyncio.CancelledError:
             raise
 
         finally:
+
             self.running = False
 
-    # ========================================================
-    # STOP
-    # ========================================================
+    async def _consume_exchange(
+        self,
+        exchange: str,
+        bot: Nobitex,
+    ) -> None:
+
+        async for message in bot.messages():
+
+            normalized = self.normalizer.normalize(
+                message
+            )
+
+            symbol = str(
+                normalized.get("symbol", "")
+            ).strip().upper()
+
+            key = (
+                exchange,
+                symbol,
+            )
+
+            database_service = (
+                self.database_services.get(key)
+            )
+
+            if database_service is None:
+                print(
+                    f"[SKIP] No database for "
+                    f"{exchange}/{symbol}"
+                )
+                continue
+
+            database_service.save(
+                normalized
+            )
+
+            print(
+                f"[SAVED] "
+                f"{exchange} "
+                f"{symbol} "
+                f"{normalized['type']}"
+            )
 
     async def stop(self) -> None:
 
         if not self.running:
             return
 
-        print(
-            f"STOPPING EXCHANGE: "
-            f"{self.exchange_name}"
-        )
+        print("")
+        print("STOPPING KIA BOT...")
+
+        for bot in self.bots.values():
+
+            await bot.close()
 
         await self.service_manager.stop_all()
 
         self.running = False
 
-        print(
-            f"EXCHANGE STOPPED: "
-            f"{self.exchange_name}"
-        )
+        print("KIA BOT STOPPED")
 
-    # ========================================================
-    # EXCHANGE SWITCH
-    # ========================================================
+    async def restart(self) -> None:
 
-    async def switch_exchange(
-        self,
-        exchange: str,
-    ) -> None:
+        await self.stop()
 
-        exchange = (
-            str(exchange)
-            .strip()
-            .upper()
-        )
+        self.selections = self._load_selection()
 
-        if exchange not in self.SUPPORTED_EXCHANGES:
-            raise RuntimeError(
-                f"Unsupported exchange: "
-                f"{exchange}"
-            )
+        self.bots.clear()
+        self.databases.clear()
+        self.database_services.clear()
+        self.exchange_services.clear()
+        self.service_manager = ServiceManager()
 
-        if exchange == self.exchange_name:
-            return
+        self._build_runtime()
 
-        was_running = self.running
+        await self.start()
 
-        if was_running:
-            await self.stop()
 
-        self.exchange_name = exchange
-
-        self.bot = self._create_exchange(
-            exchange
-        )
-
-        self.database = self._create_database()
-
-        self.exchange_service.bot = self.bot
-
-        self.database_service.database = (
-            self.database
-        )
-
-        if was_running:
-            await self.start()
+if __name__ == "__main__":
+    asyncio.run(KIACore().start())

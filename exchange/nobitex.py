@@ -1,20 +1,9 @@
-﻿"""
-KIA BOT - Nobitex Raw WebSocket
-"""
-
 from __future__ import annotations
 
 import asyncio
 import json
 from pathlib import Path
-
-from websockets.asyncio.client import ClientConnection
-from websockets.exceptions import (
-    ConnectionClosed,
-    ConnectionClosedError,
-    ConnectionClosedOK,
-)
-from websockets.asyncio.client import connect as ws_connect
+from typing import Any
 
 from .config import NobitexConfig
 from .channels import (
@@ -22,6 +11,14 @@ from .channels import (
     market_stats_channel,
     orderbook_channel,
     trades_channel,
+)
+
+from websockets.asyncio.client import ClientConnection
+from websockets.asyncio.client import connect as ws_connect
+from websockets.exceptions import (
+    ConnectionClosed,
+    ConnectionClosedError,
+    ConnectionClosedOK,
 )
 
 
@@ -38,10 +35,12 @@ class Nobitex:
         self.connected = False
         self.protocol_ready = False
 
-        self.symbol: str | None = None
-        self.resolution: str | None = None
+        self.symbols: set[str] = set()
+        self.resolution = "5"
 
         self._request_id = 1
+        self._message_queue = asyncio.Queue()
+        self._reader_task: asyncio.Task | None = None
 
     async def connect(self) -> None:
 
@@ -54,7 +53,7 @@ class Nobitex:
             ws_connect(
                 self.config.websocket_url,
                 open_timeout=self.config.timeout,
-                ping_interval=self.config.ping_interval,
+                ping_interval=None,
                 close_timeout=5,
             ),
             timeout=self.config.timeout + 5,
@@ -65,6 +64,10 @@ class Nobitex:
         print("CONNECTED")
 
         await self._centrifugo_connect()
+
+        self._reader_task = asyncio.create_task(
+            self._reader_loop()
+        )
 
     async def _centrifugo_connect(self) -> None:
 
@@ -103,11 +106,8 @@ class Nobitex:
                 continue
 
             if "connect" in message:
-
                 self.protocol_ready = True
-
                 print("CENTRIFUGO READY")
-
                 return
 
             if "error" in message:
@@ -142,26 +142,72 @@ class Nobitex:
         resolution: str = "5",
     ) -> None:
 
-        self.symbol = symbol.strip().upper()
-        self.resolution = str(resolution).strip()
-
-        channels = (
-            orderbook_channel(self.symbol),
-            candle_channel(
-                self.symbol,
-                self.resolution,
-            ),
-            trades_channel(self.symbol),
-            market_stats_channel(self.symbol),
+        await self.select_markets(
+            [symbol],
+            resolution,
         )
 
-        for channel in channels:
-            await self.subscribe(channel)
+    async def select_markets(
+        self,
+        symbols: list[str] | set[str] | tuple[str, ...],
+        resolution: str = "5",
+    ) -> None:
 
-    async def messages(self):
+        self.resolution = str(resolution).strip()
 
-        if not self.connected or self.socket is None:
-            raise RuntimeError("WebSocket is not connected.")
+        normalized_symbols = {
+            str(symbol).strip().upper()
+            for symbol in symbols
+            if str(symbol).strip()
+        }
+
+        self.symbols = normalized_symbols
+
+        for symbol in sorted(self.symbols):
+
+            channels = (
+                orderbook_channel(symbol),
+                candle_channel(
+                    symbol,
+                    self.resolution,
+                ),
+                trades_channel(symbol),
+                market_stats_channel(symbol),
+            )
+
+            for channel in channels:
+                await self.subscribe(channel)
+
+    @staticmethod
+    def _symbol_from_channel(channel: str) -> str | None:
+
+        channel = str(channel).strip()
+
+        prefixes = (
+            "public:orderbook-",
+            "public:trades-",
+            "public:market-stats-",
+            "public:candle-",
+        )
+
+        for prefix in prefixes:
+
+            if channel.startswith(prefix):
+
+                value = channel[len(prefix):]
+
+                if prefix == "public:candle-":
+                    parts = value.rsplit("-", 1)
+                    value = parts[0]
+
+                return value.strip().upper()
+
+        return None
+
+    async def _reader_loop(self) -> None:
+
+        if self.socket is None:
+            return
 
         try:
 
@@ -170,6 +216,7 @@ class Nobitex:
                 if isinstance(raw, bytes):
                     raw = raw.decode("utf-8")
 
+                # Centrifugo application-level heartbeat.
                 if raw == "{}":
                     try:
                         await self.socket.send("{}")
@@ -200,25 +247,34 @@ class Nobitex:
                 channel = push.get("channel")
                 pub = push.get("pub")
 
+                if not isinstance(channel, str):
+                    continue
+
                 if not isinstance(pub, dict):
                     continue
 
                 data = pub.get("data")
 
                 if isinstance(data, str):
-
                     try:
                         data = json.loads(data)
                     except json.JSONDecodeError:
                         pass
 
-                yield {
-                    "symbol": self.symbol,
-                    "resolution": self.resolution,
-                    "channel": channel,
-                    "data": data,
-                    "raw": message,
-                }
+                symbol = self._symbol_from_channel(channel)
+
+                if not symbol:
+                    continue
+
+                await self._message_queue.put(
+                    {
+                        "symbol": symbol,
+                        "resolution": self.resolution,
+                        "channel": channel,
+                        "data": data,
+                        "raw": message,
+                    }
+                )
 
         except (
             ConnectionClosed,
@@ -231,14 +287,43 @@ class Nobitex:
             )
 
         finally:
-
             self.connected = False
             self.protocol_ready = False
+
+    async def messages(self):
+
+        if not self.connected:
+            raise RuntimeError(
+                "WebSocket is not connected."
+            )
+
+        while self.connected:
+
+            try:
+                message = await self._message_queue.get()
+            except asyncio.CancelledError:
+                raise
+
+            yield message
 
     async def close(self) -> None:
 
         self.connected = False
         self.protocol_ready = False
+        self.symbols.clear()
+
+        if self._reader_task is not None:
+
+            self._reader_task.cancel()
+
+            try:
+                await self._reader_task
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                pass
+
+            self._reader_task = None
 
         if self.socket is not None:
 
@@ -248,62 +333,3 @@ class Nobitex:
                 pass
 
             self.socket = None
-
-
-async def main():
-
-    bot = Nobitex()
-
-    try:
-
-        await bot.connect()
-
-        state_file = Path(__file__).with_name("market_state.json")
-
-        if not state_file.exists():
-            raise RuntimeError(
-                "No market_state.json found. Select a market first."
-            )
-
-        state = json.loads(
-            state_file.read_text(encoding="utf-8")
-        )
-
-        market = state.get("active_market")
-
-        if not market:
-            raise RuntimeError(
-                "No active market selected."
-            )
-
-        market = str(market).strip().upper()
-
-        print(f"ACTIVE MARKET FROM SELECTOR: {market}")
-
-        await bot.select_market(
-            market,
-            "5",
-        )
-
-        print("\nWAITING FOR RAW DATA...\n")
-
-        async for message in bot.messages():
-
-            print("=" * 80)
-
-            print(
-                json.dumps(
-                    message,
-                    ensure_ascii=False,
-                    indent=2,
-                )
-            )
-
-    finally:
-
-        await bot.close()
-
-
-if __name__ == "__main__":
-    asyncio.run(main())
-

@@ -1,8 +1,10 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import asyncio
 import json
 import threading
+import subprocess
+import sys
 import tkinter as tk
 from pathlib import Path
 from tkinter import ttk, messagebox
@@ -417,6 +419,26 @@ class KIAControlWindow:
 
         ttk.Button(
             buttons,
+            text="MARKET SELECTOR",
+            style="Action.TButton",
+            command=self.open_market_selector,
+        ).pack(
+            side="left",
+            padx=4,
+        )
+
+        ttk.Button(
+            buttons,
+            text="DATABASE MANAGER",
+            style="Action.TButton",
+            command=self.open_database_manager,
+        ).pack(
+            side="left",
+            padx=4,
+        )
+
+        ttk.Button(
+            buttons,
             text="REFRESH SELECTION",
             style="Action.TButton",
             command=self.refresh_selection,
@@ -662,6 +684,37 @@ class KIAControlWindow:
             )
 
         self.loop.close()
+
+    # ========================================================
+    # EXTERNAL WINDOWS
+    # ========================================================
+
+    def open_market_selector(self):
+        try:
+            subprocess.Popen(
+                [sys.executable, "-m", "market_selector"],
+                cwd=str(ROOT),
+            )
+        except Exception as exc:
+            messagebox.showerror(
+                "KIA BOT",
+                f"Could not open Market Selector.\n\n{exc}",
+            )
+
+    def open_database_manager(self):
+        try:
+            subprocess.Popen(
+                [
+                    sys.executable,
+                    str(ROOT / "database" / "manager.py"),
+                ],
+                cwd=str(ROOT),
+            )
+        except Exception as exc:
+            messagebox.showerror(
+                "KIA BOT",
+                f"Could not open Database Manager.\n\n{exc}",
+            )
 
     # ========================================================
     # START
