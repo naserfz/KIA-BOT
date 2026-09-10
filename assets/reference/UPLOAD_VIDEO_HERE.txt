@@ -1,0 +1,6 @@
+KIA BOT - REFERENCE VIDEO
+
+Upload the reference animation video into this folder.
+Suggested filename: plasma_reference.mp4
+
+This file is a placeholder so the folder exists in GitHub.
